@@ -1,6 +1,15 @@
+import sys
 from pathlib import Path
 
 import pandas as pd
+
+
+# Add src directory to Python's import path.
+SRC_DIR = Path(__file__).resolve().parents[1]
+
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
 
 from analysis.validator import load_dataset
 
@@ -12,27 +21,33 @@ def calculate_total_revenue(
     Calculate total revenue.
     """
 
-    return float(df["revenue"].sum())
+    return float(
+        df["revenue"].sum()
+    )
 
 
 def calculate_total_orders(
     df: pd.DataFrame,
 ) -> int:
     """
-    Calculate the number of unique orders.
+    Calculate total number of unique orders.
     """
 
-    return int(df["order_id"].nunique())
+    return int(
+        df["order_id"].nunique()
+    )
 
 
 def calculate_total_customers(
     df: pd.DataFrame,
 ) -> int:
     """
-    Calculate the number of unique customers.
+    Calculate total number of unique customers.
     """
 
-    return int(df["customer_id"].nunique())
+    return int(
+        df["customer_id"].nunique()
+    )
 
 
 def calculate_total_profit(
@@ -42,65 +57,68 @@ def calculate_total_profit(
     Calculate total profit.
     """
 
-    return float(df["profit"].sum())
+    return float(
+        df["profit"].sum()
+    )
 
 
 def calculate_profit_margin(
-    df: pd.DataFrame,
+    total_profit: float,
+    total_revenue: float,
 ) -> float:
     """
     Calculate profit margin as a percentage.
     """
 
-    revenue = calculate_total_revenue(df)
-    profit = calculate_total_profit(df)
-
-    if revenue == 0:
+    if total_revenue == 0:
         return 0.0
 
-    return float(
-        (profit / revenue) * 100
+    return (
+        total_profit
+        / total_revenue
+        * 100
     )
 
 
 def calculate_average_order_value(
-    df: pd.DataFrame,
+    total_revenue: float,
+    total_orders: int,
 ) -> float:
     """
-    Calculate average revenue per order.
+    Calculate average order value.
     """
 
-    revenue = calculate_total_revenue(df)
-    orders = calculate_total_orders(df)
-
-    if orders == 0:
+    if total_orders == 0:
         return 0.0
 
-    return float(
-        revenue / orders
+    return (
+        total_revenue
+        / total_orders
     )
 
 
 def calculate_return_rate(
     df: pd.DataFrame,
+    total_orders: int,
 ) -> float:
     """
-    Calculate the percentage of orders that
-    were returned.
+    Calculate the percentage of returned orders.
     """
 
-    orders = calculate_total_orders(df)
-
-    if orders == 0:
+    if total_orders == 0:
         return 0.0
 
     returned_orders = int(
-        (df["return_status"] == "Returned")
-        .sum()
+        (
+            df["return_status"]
+            == "Returned"
+        ).sum()
     )
 
-    return float(
-        (returned_orders / orders) * 100
+    return (
+        returned_orders
+        / total_orders
+        * 100
     )
 
 
@@ -132,39 +150,129 @@ def calculate_kpis(
     df: pd.DataFrame,
 ) -> dict:
     """
-    Calculate all primary INSIGHT KPIs.
+    Calculate the complete set of core
+    business KPIs for INSIGHT.
     """
 
+    if df.empty:
+        raise ValueError(
+            "Dataset is empty."
+        )
+
+    required_columns = [
+        "revenue",
+        "profit",
+        "order_id",
+        "customer_id",
+        "return_status",
+        "delivery_days",
+        "satisfaction_score",
+    ]
+
+    missing_columns = [
+        column
+        for column in required_columns
+        if column not in df.columns
+    ]
+
+    if missing_columns:
+        raise ValueError(
+            "Missing required columns: "
+            + ", ".join(missing_columns)
+        )
+
+    total_revenue = (
+        calculate_total_revenue(df)
+    )
+
+    total_orders = (
+        calculate_total_orders(df)
+    )
+
+    total_customers = (
+        calculate_total_customers(df)
+    )
+
+    total_profit = (
+        calculate_total_profit(df)
+    )
+
+    profit_margin = (
+        calculate_profit_margin(
+            total_profit,
+            total_revenue,
+        )
+    )
+
+    average_order_value = (
+        calculate_average_order_value(
+            total_revenue,
+            total_orders,
+        )
+    )
+
+    return_rate = (
+        calculate_return_rate(
+            df,
+            total_orders,
+        )
+    )
+
+    average_delivery_time = (
+        calculate_average_delivery_time(df)
+    )
+
+    average_satisfaction = (
+        calculate_average_satisfaction(df)
+    )
+
     return {
-        "total_revenue": calculate_total_revenue(df),
-        "total_orders": calculate_total_orders(df),
-        "total_customers": calculate_total_customers(df),
-        "total_profit": calculate_total_profit(df),
-        "profit_margin": calculate_profit_margin(df),
-        "average_order_value": (
-            calculate_average_order_value(df)
+        "total_revenue": round(
+            total_revenue,
+            2,
         ),
-        "return_rate": calculate_return_rate(df),
-        "average_delivery_time": (
-            calculate_average_delivery_time(df)
+        "total_orders": total_orders,
+        "total_customers": total_customers,
+        "total_profit": round(
+            total_profit,
+            2,
         ),
-        "average_satisfaction": (
-            calculate_average_satisfaction(df)
+        "profit_margin": round(
+            profit_margin,
+            2,
+        ),
+        "average_order_value": round(
+            average_order_value,
+            2,
+        ),
+        "return_rate": round(
+            return_rate,
+            2,
+        ),
+        "average_delivery_time": round(
+            average_delivery_time,
+            2,
+        ),
+        "average_satisfaction": round(
+            average_satisfaction,
+            2,
         ),
     }
 
 
-def print_kpis(
+def print_kpi_report(
     kpis: dict,
 ) -> None:
     """
-    Print KPIs in a human-readable format.
+    Print a human-readable KPI report.
     """
 
     print()
-    print("=" * 60)
-    print("INSIGHT — KPI REPORT")
-    print("=" * 60)
+    print("=" * 80)
+    print("INSIGHT — BUSINESS KPI SUMMARY")
+    print("=" * 80)
+
+    print()
 
     print(
         f"Total Revenue:          "
@@ -211,25 +319,28 @@ def print_kpis(
         f"{kpis['average_satisfaction']:.2f}/5"
     )
 
-    print("=" * 60)
+    print()
 
 
-def main():
-    project_root = (
-        Path(__file__).resolve().parents[2]
-    )
+def main() -> None:
+    """
+    Load the synthetic dataset and
+    print the KPI report.
+    """
 
     dataset_path = (
-        project_root
+        Path(__file__).resolve().parents[2]
         / "data"
         / "synthetic_retail_data.csv"
     )
 
-    df = load_dataset(dataset_path)
+    df = load_dataset(
+        dataset_path
+    )
 
     kpis = calculate_kpis(df)
 
-    print_kpis(kpis)
+    print_kpi_report(kpis)
 
 
 if __name__ == "__main__":
