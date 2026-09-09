@@ -1,81 +1,444 @@
-import math
-import tempfile
 from pathlib import Path
+import sys
+from typing import Any
 
 import pandas as pd
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
-from src.analysis.kpis import calculate_kpis
-from src.analysis.patterns import calculate_patterns
-from src.analysis.trends import calculate_trends
-from src.features.engineering import engineer_features
-from src.insights.engine import generate_insights
-from src.models.anomaly_detector import (
+
+# -------------------------------------------------------------------
+# Project path setup
+# -------------------------------------------------------------------
+
+SRC_DIR = Path(__file__).resolve().parents[1]
+
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+
+# -------------------------------------------------------------------
+# Analysis imports
+# -------------------------------------------------------------------
+
+from analysis.kpis import calculate_kpis
+from analysis.patterns import calculate_patterns
+from analysis.profiler import generate_profile
+from analysis.trends import calculate_trends
+from analysis.validator import validate_dataset
+from features.engineering import engineer_features
+from models.anomaly_detector import (
     AnomalyDetector,
     evaluate_predictions,
 )
+from insights.engine import generate_insights
+
+from chatbot.service import InsightChatbot
 
 
-router = APIRouter(
-    prefix="/api",
-    tags=["Analysis"],
+# -------------------------------------------------------------------
+# Router
+# -------------------------------------------------------------------
+
+router = APIRouter()
+
+
+# -------------------------------------------------------------------
+# Paths
+# -------------------------------------------------------------------
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+DATA_DIR = PROJECT_ROOT / "data"
+
+SYNTHETIC_DATASET_PATH = (
+    DATA_DIR / "synthetic_retail_data.csv"
 )
 
 
-def make_json_safe(value):
-    """
-    Convert pandas/NumPy values into JSON-safe values.
+# -------------------------------------------------------------------
+# Chatbot
+# -------------------------------------------------------------------
 
-    NaN and infinite values are converted to None.
-    Dictionaries and lists are handled recursively.
+chatbot = InsightChatbot()
+
+
+# -------------------------------------------------------------------
+# Serialization helpers
+# -------------------------------------------------------------------
+
+def _serialize_value(value: Any) -> Any:
+    """
+    Convert pandas, NumPy, and other scalar values
+    into JSON-safe values.
     """
 
+    # NumPy arrays
+    if hasattr(value, "tolist"):
+        try:
+            return _serialize_object(
+                value.tolist()
+            )
+        except Exception:
+            pass
+
+    # NumPy scalar values
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            pass
+
+    # Pandas timestamps
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+
+    # None
     if value is None:
         return None
 
+    # Pandas missing scalar values
+    try:
+        if (
+            pd.api.types.is_scalar(value)
+            and pd.isna(value)
+        ):
+            return None
+    except (TypeError, ValueError):
+        pass
+
+    return value
+
+
+def _serialize_dataframe(
+    df: pd.DataFrame,
+) -> list[dict[str, Any]]:
+    """
+    Convert a DataFrame into JSON-safe records.
+    """
+
+    records = df.to_dict(
+        orient="records"
+    )
+
+    serialized = []
+
+    for record in records:
+
+        serialized_record = {
+            key: _serialize_value(value)
+            for key, value in record.items()
+        }
+
+        serialized.append(
+            serialized_record
+        )
+
+    return serialized
+
+
+def _serialize_object(
+    value: Any,
+) -> Any:
+    """
+    Recursively convert analysis objects into
+    JSON-compatible structures.
+    """
+
+    if isinstance(value, pd.DataFrame):
+        return _serialize_dataframe(value)
+
+    if isinstance(value, pd.Series):
+        return [
+            _serialize_value(item)
+            for item in value.tolist()
+        ]
+
     if isinstance(value, dict):
         return {
-            key: make_json_safe(item)
+            str(key): _serialize_object(item)
             for key, item in value.items()
         }
 
     if isinstance(value, list):
         return [
-            make_json_safe(item)
+            _serialize_object(item)
             for item in value
         ]
 
     if isinstance(value, tuple):
         return [
-            make_json_safe(item)
+            _serialize_object(item)
             for item in value
         ]
 
+    if hasattr(value, "__dict__"):
+        return {
+            key: _serialize_object(item)
+            for key, item in value.__dict__.items()
+        }
+
+    return _serialize_value(value)
+
+
+# -------------------------------------------------------------------
+# Ground-truth helper
+# -------------------------------------------------------------------
+
+GROUND_TRUTH_COLUMNS = {
+    "is_injected_anomaly",
+    "anomaly_type",
+}
+
+
+def _has_ground_truth(
+    df: pd.DataFrame,
+) -> bool:
+    """
+    Determine whether the dataset contains the
+    synthetic evaluation ground-truth columns.
+    """
+
+    return GROUND_TRUTH_COLUMNS.issubset(
+        set(df.columns)
+    )
+
+
+# -------------------------------------------------------------------
+# Core analysis pipeline
+# -------------------------------------------------------------------
+
+def run_analysis_pipeline(
+    df: pd.DataFrame,
+    source_name: str = "dataset",
+) -> dict[str, Any]:
+    """
+    Run the complete INSIGHT analysis pipeline.
+
+    Pipeline:
+
+        Raw Data
+            ↓
+        Validation
+            ↓
+        Profiling
+            ↓
+        KPIs
+            ↓
+        Trends
+            ↓
+        Patterns
+            ↓
+        Feature Engineering
+            ↓
+        Isolation Forest
+            ↓
+        Evaluation (when ground truth exists)
+            ↓
+        Insights
+    """
+
+    if df.empty:
+        raise ValueError(
+            "The supplied dataset is empty."
+        )
+
+    # ---------------------------------------------------------------
+    # 1. Determine whether evaluation ground truth exists
+    # ---------------------------------------------------------------
+
+    has_ground_truth = _has_ground_truth(df)
+
+    # ---------------------------------------------------------------
+    # 2. Validation
+    # ---------------------------------------------------------------
+
+    validation = validate_dataset(df)
+
+    if not validation.get("valid", False):
+        return {
+            "success": False,
+            "source": source_name,
+            "error": "Dataset validation failed.",
+            "validation": validation,
+        }
+
+    # ---------------------------------------------------------------
+    # 3. Dataset profile
+    # ---------------------------------------------------------------
+
+    profile = generate_profile(df)
+
+    # ---------------------------------------------------------------
+    # 4. KPI calculations
+    # ---------------------------------------------------------------
+
+    kpis = calculate_kpis(df)
+
+    # ---------------------------------------------------------------
+    # 5. Trend analysis
+    # ---------------------------------------------------------------
+
+    trends = calculate_trends(df)
+
+    # ---------------------------------------------------------------
+    # 6. Pattern analysis
+    # ---------------------------------------------------------------
+
+    patterns = calculate_patterns(df)
+
+    # ---------------------------------------------------------------
+    # 7. Feature engineering + ML
+    #
+    # IMPORTANT:
+    # Ground-truth columns are not used as ML features.
+    # ---------------------------------------------------------------
+
+    engineered_df = engineer_features(df)
+
+    detector = AnomalyDetector(
+        contamination=0.03,
+        random_state=42,
+    )
+
+    predictions = detector.fit_predict(
+        engineered_df
+    )
+
+    # ---------------------------------------------------------------
+    # 8. Evaluation
+    #
+    # Evaluation only makes sense when ground truth exists.
+    # ---------------------------------------------------------------
+
+    evaluation = None
+
+    if has_ground_truth:
+        evaluation = evaluate_predictions(
+            predictions
+        )
+
+    # ---------------------------------------------------------------
+    # 9. Insight generation
+    #
+    # Reuse already-computed analytics instead of recalculating
+    # trends, patterns, and anomaly detection.
+    # ---------------------------------------------------------------
+
+    insights = generate_insights(
+        df,
+        monthly_metrics=trends,
+        patterns=patterns,
+        predictions=predictions,
+    )
+
+    # ---------------------------------------------------------------
+    # 10. Build response
+    # ---------------------------------------------------------------
+
+    result = {
+        "success": True,
+        "source": source_name,
+
+        "dataset": {
+            "rows": int(len(df)),
+            "columns": int(len(df.columns)),
+            "column_names": list(df.columns),
+        },
+
+        "validation": validation,
+
+        "profile": profile,
+
+        "kpis": kpis,
+
+        "trends": trends,
+
+        "patterns": patterns,
+
+        "features": {
+            "rows": int(len(engineered_df)),
+            "columns": int(
+                len(engineered_df.columns)
+            ),
+            "column_names": list(
+                engineered_df.columns
+            ),
+        },
+
+        "anomalies": {
+            "predictions": predictions,
+            "evaluation": evaluation,
+        },
+
+        "insights": insights,
+    }
+
+    return _serialize_object(result)
+
+
+# -------------------------------------------------------------------
+# API status
+# -------------------------------------------------------------------
+
+@router.get("/api/status")
+def api_status() -> dict[str, Any]:
+    """
+    Return API status information.
+    """
+
+    return {
+        "status": "online",
+        "service": "INSIGHT API",
+    }
+
+
+# -------------------------------------------------------------------
+# Synthetic dataset analysis
+# -------------------------------------------------------------------
+
+@router.get("/api/analyze-synthetic")
+def analyze_synthetic() -> dict[str, Any]:
+    """
+    Analyze the bundled synthetic retail dataset.
+    """
+
+    if not SYNTHETIC_DATASET_PATH.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Synthetic dataset not found: "
+                f"{SYNTHETIC_DATASET_PATH}"
+            ),
+        )
+
     try:
-        if pd.isna(value):
-            return None
-    except (TypeError, ValueError):
-        pass
+        df = pd.read_csv(
+            SYNTHETIC_DATASET_PATH
+        )
 
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            return None
+        return run_analysis_pipeline(
+            df,
+            source_name="synthetic",
+        )
 
-    if hasattr(value, "item"):
-        try:
-            return make_json_safe(
-                value.item()
-            )
-        except (ValueError, TypeError):
-            pass
+    except HTTPException:
+        raise
 
-    return value
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Analysis failed: {exc}",
+        ) from exc
 
 
-@router.post("/analyze")
-def analyze_dataset(
+# -------------------------------------------------------------------
+# Uploaded CSV analysis
+# -------------------------------------------------------------------
+
+@router.post("/api/analyze")
+async def analyze_csv(
     file: UploadFile = File(...),
-):
+) -> dict[str, Any]:
     """
     Analyze an uploaded CSV dataset.
     """
@@ -83,7 +446,7 @@ def analyze_dataset(
     if not file.filename:
         raise HTTPException(
             status_code=400,
-            detail="Filename is required.",
+            detail="No file was provided.",
         )
 
     if not file.filename.lower().endswith(
@@ -94,375 +457,96 @@ def analyze_dataset(
             detail="Only CSV files are supported.",
         )
 
-    temp_path = None
-
     try:
-        with tempfile.NamedTemporaryFile(
-            delete=False,
-            suffix=".csv",
-        ) as temp_file:
+        contents = await file.read()
 
-            temp_path = Path(
-                temp_file.name
+        if not contents:
+            raise HTTPException(
+                status_code=400,
+                detail="Uploaded file is empty.",
             )
 
-            contents = file.file.read()
+        from io import BytesIO
 
-            if not contents:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Uploaded file is empty.",
-                )
+        df = pd.read_csv(
+            BytesIO(contents)
+        )
 
-            temp_file.write(contents)
+        return run_analysis_pipeline(
+            df,
+            source_name=file.filename,
+        )
 
-        df = pd.read_csv(temp_path)
-
-        insights = generate_insights(df)
-
-        response = {
-            "status": "success",
-            "filename": file.filename,
-            "rows": len(df),
-            "columns": len(df.columns),
-            "insight_count": len(insights),
-            "insights": [
-                {
-                    "title": insight.title,
-                    "finding": insight.finding,
-                    "evidence": insight.evidence,
-                    "severity": insight.severity,
-                    "impact": insight.impact,
-                    "possible_contributing_factors": (
-                        insight.possible_contributing_factors
-                    ),
-                    "recommendation": (
-                        insight.recommendation
-                    ),
-                }
-                for insight in insights
-            ],
-        }
-
-        return make_json_safe(response)
+    except HTTPException:
+        raise
 
     except pd.errors.EmptyDataError as exc:
         raise HTTPException(
             status_code=400,
-            detail="The uploaded CSV contains no data.",
+            detail="Uploaded CSV contains no data.",
         ) from exc
 
     except pd.errors.ParserError as exc:
         raise HTTPException(
             status_code=400,
-            detail="The uploaded file is not a valid CSV.",
-        ) from exc
-
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        ) from exc
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Dataset analysis failed: {exc}",
-        ) from exc
-
-    finally:
-        if (
-            temp_path is not None
-            and temp_path.exists()
-        ):
-            temp_path.unlink()
-
-
-@router.get("/analyze-synthetic")
-def analyze_synthetic_dataset():
-    """
-    Analyze the built-in synthetic retail dataset.
-
-    Returns the complete analytics payload
-    required by the Streamlit dashboard.
-    """
-
-    dataset_path = (
-        Path(__file__).resolve().parents[2]
-        / "data"
-        / "synthetic_retail_data.csv"
-    )
-
-    if not dataset_path.exists():
-        raise HTTPException(
-            status_code=404,
-            detail="Synthetic dataset not found.",
-        )
-
-    try:
-
-        # =========================================================
-        # LOAD DATASET
-        # =========================================================
-
-        df = pd.read_csv(
-            dataset_path
-        )
-
-        # =========================================================
-        # 1. CORE KPIs
-        # =========================================================
-
-        kpis = calculate_kpis(df)
-
-        # =========================================================
-        # 2. MONTHLY TRENDS
-        # =========================================================
-
-        trends = calculate_trends(df)
-
-        trend_records = trends.to_dict(
-            orient="records"
-        )
-
-        # =========================================================
-        # 3. PATTERN ANALYSIS
-        # =========================================================
-
-        patterns = calculate_patterns(
-            df
-        )
-
-        correlation_matrix = patterns[
-            "correlation_matrix"
-        ].to_dict()
-
-        strong_correlations = patterns[
-            "strong_correlations"
-        ]
-
-        segment_performance = {
-            segment: dataframe.to_dict(
-                orient="records"
-            )
-            for segment, dataframe
-            in patterns[
-                "segment_performance"
-            ].items()
-        }
-
-        segment_extremes = patterns[
-            "segment_extremes"
-        ]
-
-        # =========================================================
-        # 4. FEATURE ENGINEERING
-        # =========================================================
-
-        engineered_df = engineer_features(
-            df
-        )
-
-        # =========================================================
-        # 5. ANOMALY DETECTION
-        # =========================================================
-
-        detector = AnomalyDetector()
-
-        predictions = detector.fit_predict(
-            engineered_df
-        )
-
-        evaluation = evaluate_predictions(
-            predictions
-        )
-
-        predicted_anomalies = predictions[
-            predictions[
-                "is_predicted_anomaly"
-            ]
-            == 1
-        ].copy()
-
-        predicted_anomalies = (
-            predicted_anomalies
-            .sort_values(
-                "anomaly_score",
-                ascending=True,
-            )
-            .head(20)
-        )
-
-        anomaly_records = []
-
-        for _, row in (
-            predicted_anomalies.iterrows()
-        ):
-
-            anomaly_records.append(
-                {
-                    "order_id": str(
-                        row["order_id"]
-                    ),
-                    "anomaly_score": float(
-                        row["anomaly_score"]
-                    ),
-                    "revenue": float(
-                        row["revenue"]
-                    ),
-                    "profit": float(
-                        row["profit"]
-                    ),
-                    "delivery_days": float(
-                        row["delivery_days"]
-                    ),
-                    "return_status": str(
-                        row["return_status"]
-                    ),
-                    "category": str(
-                        row["category"]
-                    ),
-                    "region": str(
-                        row["region"]
-                    ),
-                }
-            )
-
-        predicted_count = int(
-            predictions[
-                "is_predicted_anomaly"
-            ].sum()
-        )
-
-        anomaly_rate = (
-            predicted_count
-            / len(predictions)
-            * 100
-        )
-
-        # =========================================================
-        # 6. INSIGHT ENGINE
-        # =========================================================
-
-        insights = generate_insights(
-            df
-        )
-
-        insight_records = [
-            {
-                "title": insight.title,
-                "finding": insight.finding,
-                "evidence": insight.evidence,
-                "severity": insight.severity,
-                "impact": insight.impact,
-                "possible_contributing_factors": (
-                    insight.possible_contributing_factors
-                ),
-                "recommendation": (
-                    insight.recommendation
-                ),
-            }
-            for insight in insights
-        ]
-
-        # =========================================================
-        # 7. COMPLETE DASHBOARD PAYLOAD
-        # =========================================================
-
-        response = {
-            "status": "success",
-
-            "dataset": {
-                "filename": (
-                    dataset_path.name
-                ),
-                "rows": len(df),
-                "columns": len(df.columns),
-            },
-
-            "kpis": kpis,
-
-            "trends": trend_records,
-
-            "segments": (
-                segment_performance
-            ),
-
-            "segment_extremes": (
-                segment_extremes
-            ),
-
-            "correlations": {
-                "strong": (
-                    strong_correlations
-                ),
-                "matrix": (
-                    correlation_matrix
-                ),
-            },
-
-            "anomalies": {
-                "predicted_count": (
-                    predicted_count
-                ),
-                "predicted_rate": round(
-                    anomaly_rate,
-                    2,
-                ),
-
-                "evaluation": {
-                    "precision": float(
-                        evaluation[
-                            "precision"
-                        ]
-                    ),
-                    "recall": float(
-                        evaluation[
-                            "recall"
-                        ]
-                    ),
-                    "f1_score": float(
-                        evaluation[
-                            "f1_score"
-                        ]
-                    ),
-                    "confusion_matrix": (
-                        evaluation[
-                            "confusion_matrix"
-                        ].tolist()
-                    ),
-                },
-
-                "records": (
-                    anomaly_records
-                ),
-            },
-
-            "insight_count": len(
-                insights
-            ),
-
-            "insights": (
-                insight_records
-            ),
-        }
-
-        return make_json_safe(
-            response
-        )
-
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        ) from exc
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
             detail=(
-                "Synthetic dataset "
-                "analysis failed: "
+                "Could not parse the uploaded CSV: "
                 f"{exc}"
             ),
+        ) from exc
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Analysis failed: {exc}",
+        ) from exc
+
+
+# -------------------------------------------------------------------
+# AI Assistant
+# -------------------------------------------------------------------
+
+@router.post("/api/chat")
+async def chat(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Ask the INSIGHT AI Assistant a question.
+
+    The optional `analysis` field allows the chatbot
+    to reason over the dataset that has already been
+    analyzed instead of silently switching to another
+    dataset.
+    """
+
+    question = payload.get("question")
+
+    if not isinstance(question, str):
+        raise HTTPException(
+            status_code=400,
+            detail="Question must be a string.",
+        )
+
+    question = question.strip()
+
+    if not question:
+        raise HTTPException(
+            status_code=400,
+            detail="Question cannot be empty.",
+        )
+
+    analysis = payload.get("analysis")
+
+    try:
+        response = chatbot.ask(
+            question,
+            analysis=analysis,
+        )
+
+        return _serialize_object(response)
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Chatbot failed: {exc}",
         ) from exc

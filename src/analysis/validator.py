@@ -3,7 +3,11 @@ from pathlib import Path
 import pandas as pd
 
 
-EXPECTED_COLUMNS = [
+# =============================================================================
+# REQUIRED BUSINESS COLUMNS
+# =============================================================================
+
+REQUIRED_COLUMNS = [
     "order_id",
     "order_date",
     "customer_id",
@@ -24,10 +28,22 @@ EXPECTED_COLUMNS = [
     "operational_cost",
     "profit",
     "payment_method",
+]
+
+
+# =============================================================================
+# OPTIONAL SYNTHETIC GROUND-TRUTH COLUMNS
+# =============================================================================
+
+GROUND_TRUTH_COLUMNS = [
     "is_injected_anomaly",
     "anomaly_type",
 ]
 
+
+# =============================================================================
+# EXPECTED NUMERIC COLUMNS
+# =============================================================================
 
 EXPECTED_NUMERIC_COLUMNS = [
     "quantity",
@@ -43,6 +59,10 @@ EXPECTED_NUMERIC_COLUMNS = [
 ]
 
 
+# =============================================================================
+# EXPECTED CATEGORICAL COLUMNS
+# =============================================================================
+
 EXPECTED_CATEGORICAL_COLUMNS = [
     "region",
     "channel",
@@ -51,9 +71,12 @@ EXPECTED_CATEGORICAL_COLUMNS = [
     "product",
     "return_status",
     "payment_method",
-    "anomaly_type",
 ]
 
+
+# =============================================================================
+# VALID BUSINESS VALUES
+# =============================================================================
 
 VALID_REGIONS = {
     "North",
@@ -63,11 +86,13 @@ VALID_REGIONS = {
     "Central",
 }
 
+
 VALID_CHANNELS = {
     "Website",
     "Mobile App",
     "Marketplace",
 }
+
 
 VALID_CUSTOMER_SEGMENTS = {
     "New",
@@ -75,10 +100,12 @@ VALID_CUSTOMER_SEGMENTS = {
     "Premium",
 }
 
+
 VALID_RETURN_STATUS = {
     "Returned",
     "Not Returned",
 }
+
 
 VALID_ANOMALY_TYPES = {
     "none",
@@ -90,9 +117,15 @@ VALID_ANOMALY_TYPES = {
 }
 
 
-def load_dataset(file_path: str | Path) -> pd.DataFrame:
+# =============================================================================
+# DATASET LOADING
+# =============================================================================
+
+def load_dataset(
+    file_path: str | Path,
+) -> pd.DataFrame:
     """
-    Load the generated CSV dataset.
+    Load a CSV dataset.
     """
 
     path = Path(file_path)
@@ -102,40 +135,65 @@ def load_dataset(file_path: str | Path) -> pd.DataFrame:
             f"Dataset not found: {path}"
         )
 
-    df = pd.read_csv(path)
-
-    return df
+    return pd.read_csv(path)
 
 
-def validate_schema(df: pd.DataFrame) -> list[str]:
+# =============================================================================
+# SCHEMA VALIDATION
+# =============================================================================
+
+def validate_schema(
+    df: pd.DataFrame,
+) -> list[str]:
     """
-    Validate that all required columns exist.
+    Validate required business columns.
+
+    Synthetic ground-truth columns are optional.
     """
 
     errors = []
 
     actual_columns = set(df.columns)
-    expected_columns = set(EXPECTED_COLUMNS)
+    required_columns = set(REQUIRED_COLUMNS)
 
-    missing_columns = expected_columns - actual_columns
-    unexpected_columns = actual_columns - expected_columns
+    missing_columns = (
+        required_columns - actual_columns
+    )
 
     if missing_columns:
         errors.append(
-            f"Missing columns: "
+            "Missing required columns: "
             f"{sorted(missing_columns)}"
-        )
-
-    if unexpected_columns:
-        errors.append(
-            f"Unexpected columns: "
-            f"{sorted(unexpected_columns)}"
         )
 
     return errors
 
 
-def validate_missing_values(df: pd.DataFrame) -> list[str]:
+# =============================================================================
+# GROUND-TRUTH DETECTION
+# =============================================================================
+
+def has_ground_truth(
+    df: pd.DataFrame,
+) -> bool:
+    """
+    Return True when the dataset contains the
+    synthetic anomaly ground-truth columns.
+    """
+
+    return all(
+        column in df.columns
+        for column in GROUND_TRUTH_COLUMNS
+    )
+
+
+# =============================================================================
+# MISSING VALUE VALIDATION
+# =============================================================================
+
+def validate_missing_values(
+    df: pd.DataFrame,
+) -> list[str]:
     """
     Check for missing values.
     """
@@ -145,35 +203,55 @@ def validate_missing_values(df: pd.DataFrame) -> list[str]:
     missing_counts = df.isna().sum()
 
     columns_with_missing = (
-        missing_counts[missing_counts > 0]
+        missing_counts[
+            missing_counts > 0
+        ]
     )
 
-    if not columns_with_missing.empty:
-
-        for column, count in columns_with_missing.items():
-            errors.append(
-                f"{column}: {count} missing values"
-            )
+    for column, count in (
+        columns_with_missing.items()
+    ):
+        errors.append(
+            f"{column}: {count} missing values"
+        )
 
     return errors
 
 
-def validate_duplicates(df: pd.DataFrame) -> list[str]:
+# =============================================================================
+# DUPLICATE VALIDATION
+# =============================================================================
+
+def validate_duplicates(
+    df: pd.DataFrame,
+) -> list[str]:
     """
     Check order IDs for duplicates.
     """
 
     errors = []
 
-    duplicate_count = df["order_id"].duplicated().sum()
+    if "order_id" not in df.columns:
+        return errors
+
+    duplicate_count = (
+        df["order_id"]
+        .duplicated()
+        .sum()
+    )
 
     if duplicate_count > 0:
         errors.append(
-            f"Duplicate order IDs: {duplicate_count}"
+            f"Duplicate order IDs: "
+            f"{duplicate_count}"
         )
 
     return errors
 
+
+# =============================================================================
+# NUMERIC RANGE VALIDATION
+# =============================================================================
 
 def validate_numeric_ranges(
     df: pd.DataFrame,
@@ -196,12 +274,22 @@ def validate_numeric_ranges(
         "operational_cost": (0, None),
     }
 
-    for column, (minimum, maximum) in range_rules.items():
+    for column, (
+        minimum,
+        maximum,
+    ) in range_rules.items():
+
+        if column not in df.columns:
+            continue
 
         if minimum is not None:
-            invalid = df[column] < minimum
+
+            invalid = (
+                df[column] < minimum
+            )
 
             if invalid.any():
+
                 errors.append(
                     f"{column}: "
                     f"{invalid.sum()} values below "
@@ -209,9 +297,13 @@ def validate_numeric_ranges(
                 )
 
         if maximum is not None:
-            invalid = df[column] > maximum
+
+            invalid = (
+                df[column] > maximum
+            )
 
             if invalid.any():
+
                 errors.append(
                     f"{column}: "
                     f"{invalid.sum()} values above "
@@ -221,12 +313,18 @@ def validate_numeric_ranges(
     return errors
 
 
+# =============================================================================
+# CATEGORY VALIDATION
+# =============================================================================
+
 def validate_categories(
     df: pd.DataFrame,
 ) -> list[str]:
     """
-    Validate categorical values against
-    the allowed business categories.
+    Validate known business categorical values.
+
+    Synthetic anomaly_type is validated only when
+    ground truth is available.
     """
 
     errors = []
@@ -239,10 +337,17 @@ def validate_categories(
         "anomaly_type": VALID_ANOMALY_TYPES,
     }
 
-    for column, valid_values in category_rules.items():
+    for column, valid_values in (
+        category_rules.items()
+    ):
+
+        if column not in df.columns:
+            continue
 
         actual_values = set(
-            df[column].dropna().unique()
+            df[column]
+            .dropna()
+            .unique()
         )
 
         invalid_values = (
@@ -250,6 +355,7 @@ def validate_categories(
         )
 
         if invalid_values:
+
             errors.append(
                 f"{column}: invalid values "
                 f"{sorted(invalid_values)}"
@@ -258,20 +364,28 @@ def validate_categories(
     return errors
 
 
+# =============================================================================
+# DATA TYPE VALIDATION
+# =============================================================================
+
 def validate_data_types(
     df: pd.DataFrame,
 ) -> list[str]:
     """
-    Validate the expected numeric columns.
+    Validate expected numeric columns.
     """
 
     errors = []
 
     for column in EXPECTED_NUMERIC_COLUMNS:
 
+        if column not in df.columns:
+            continue
+
         if not pd.api.types.is_numeric_dtype(
             df[column]
         ):
+
             errors.append(
                 f"{column}: expected numeric type, "
                 f"got {df[column].dtype}"
@@ -280,23 +394,35 @@ def validate_data_types(
     return errors
 
 
+# =============================================================================
+# SYNTHETIC GROUND-TRUTH VALIDATION
+# =============================================================================
+
 def validate_anomaly_labels(
     df: pd.DataFrame,
 ) -> list[str]:
     """
-    Validate consistency between the injected
-    anomaly flag and anomaly type.
+    Validate synthetic anomaly labels.
+
+    This validation runs only when the complete
+    ground-truth schema is present.
     """
 
     errors = []
 
-    anomaly_flag = df["is_injected_anomaly"]
+    if not has_ground_truth(df):
+        return errors
+
+    anomaly_flag = (
+        df["is_injected_anomaly"]
+    )
 
     invalid_flags = ~anomaly_flag.isin(
         [True, False]
     )
 
     if invalid_flags.any():
+
         errors.append(
             "is_injected_anomaly contains "
             "invalid values."
@@ -304,46 +430,74 @@ def validate_anomaly_labels(
 
     inconsistent_normal = (
         (~anomaly_flag)
-        & (df["anomaly_type"] != "none")
+        & (
+            df["anomaly_type"]
+            != "none"
+        )
     )
 
     if inconsistent_normal.any():
+
         errors.append(
-            "Normal records contain an anomaly type."
+            "Normal records contain "
+            "an anomaly type."
         )
 
     inconsistent_anomaly = (
         anomaly_flag
-        & (df["anomaly_type"] == "none")
+        & (
+            df["anomaly_type"]
+            == "none"
+        )
     )
 
     if inconsistent_anomaly.any():
+
         errors.append(
-            "Anomalous records have anomaly_type='none'."
+            "Anomalous records have "
+            "anomaly_type='none'."
         )
 
     return errors
 
+
+# =============================================================================
+# COMPLETE DATASET VALIDATION
+# =============================================================================
 
 def validate_dataset(
     df: pd.DataFrame,
 ) -> dict:
     """
     Run the complete dataset validation pipeline.
+
+    Ground-truth anomaly columns are optional.
     """
 
     errors = []
+
+    # -------------------------------------------------------------------------
+    # Schema
+    # -------------------------------------------------------------------------
 
     errors.extend(
         validate_schema(df)
     )
 
-    # Stop early if required columns are missing.
+    # Stop early if required business columns
+    # are missing.
+
     if errors:
+
         return {
             "valid": False,
             "errors": errors,
+            "has_ground_truth": has_ground_truth(df),
         }
+
+    # -------------------------------------------------------------------------
+    # Standard validation
+    # -------------------------------------------------------------------------
 
     errors.extend(
         validate_missing_values(df)
@@ -365,6 +519,10 @@ def validate_dataset(
         validate_data_types(df)
     )
 
+    # -------------------------------------------------------------------------
+    # Synthetic-only validation
+    # -------------------------------------------------------------------------
+
     errors.extend(
         validate_anomaly_labels(df)
     )
@@ -372,39 +530,86 @@ def validate_dataset(
     return {
         "valid": len(errors) == 0,
         "errors": errors,
+        "has_ground_truth": has_ground_truth(df),
     }
 
+
+# =============================================================================
+# DATASET PROFILE
+# =============================================================================
 
 def generate_profile(
     df: pd.DataFrame,
 ) -> dict:
     """
     Generate a lightweight dataset profile.
+
+    Ground-truth anomaly statistics are included
+    only when the dataset contains the synthetic
+    labels.
     """
 
-    anomaly_count = int(
-        df["is_injected_anomaly"].sum()
-    )
-
-    return {
+    profile = {
         "rows": len(df),
         "columns": len(df.columns),
         "missing_values": int(
-            df.isna().sum().sum()
+            df.isna()
+            .sum()
+            .sum()
         ),
         "duplicate_order_ids": int(
-            df["order_id"].duplicated().sum()
-        ),
-        "anomaly_count": anomaly_count,
-        "anomaly_rate": (
+            df["order_id"]
+            .duplicated()
+            .sum()
+        )
+        if "order_id" in df.columns
+        else 0,
+        "has_ground_truth": has_ground_truth(df),
+        "numeric_columns": [
+            column
+            for column in EXPECTED_NUMERIC_COLUMNS
+            if column in df.columns
+        ],
+        "categorical_columns": [
+            column
+            for column in EXPECTED_CATEGORICAL_COLUMNS
+            if column in df.columns
+        ],
+    }
+
+    # -------------------------------------------------------------------------
+    # Synthetic-only anomaly statistics
+    # -------------------------------------------------------------------------
+
+    if has_ground_truth(df):
+
+        anomaly_count = int(
+            df["is_injected_anomaly"]
+            .astype(bool)
+            .sum()
+        )
+
+        profile["anomaly_count"] = (
+            anomaly_count
+        )
+
+        profile["anomaly_rate"] = (
             anomaly_count / len(df)
             if len(df) > 0
             else 0
-        ),
-        "numeric_columns": EXPECTED_NUMERIC_COLUMNS,
-        "categorical_columns": EXPECTED_CATEGORICAL_COLUMNS,
-    }
+        )
 
+    else:
+
+        profile["anomaly_count"] = None
+        profile["anomaly_rate"] = None
+
+    return profile
+
+
+# =============================================================================
+# HUMAN-READABLE VALIDATION REPORT
+# =============================================================================
 
 def print_validation_report(
     df: pd.DataFrame,
@@ -418,34 +623,56 @@ def print_validation_report(
 
     print()
     print("=" * 60)
-    print("INSIGHT — DATASET VALIDATION REPORT")
+    print(
+        "INSIGHT — DATASET VALIDATION REPORT"
+    )
     print("=" * 60)
 
-    print(f"Rows:                {profile['rows']:,}")
-    print(f"Columns:             {profile['columns']}")
+    print(
+        f"Rows:                "
+        f"{profile['rows']:,}"
+    )
+
+    print(
+        f"Columns:             "
+        f"{profile['columns']}"
+    )
+
     print(
         f"Missing values:      "
         f"{profile['missing_values']}"
     )
+
     print(
         f"Duplicate order IDs: "
         f"{profile['duplicate_order_ids']}"
     )
+
     print(
-        f"Injected anomalies:  "
-        f"{profile['anomaly_count']:,}"
+        f"Ground truth:        "
+        f"{'Available' if profile['has_ground_truth'] else 'Not available'}"
     )
-    print(
-        f"Anomaly rate:        "
-        f"{profile['anomaly_rate']:.2%}"
-    )
+
+    if profile["has_ground_truth"]:
+
+        print(
+            f"Injected anomalies:  "
+            f"{profile['anomaly_count']:,}"
+        )
+
+        print(
+            f"Anomaly rate:        "
+            f"{profile['anomaly_rate']:.2%}"
+        )
 
     print()
 
     if result["valid"]:
 
         print("STATUS: PASS")
-        print("Dataset passed all validation checks.")
+        print(
+            "Dataset passed all validation checks."
+        )
 
     else:
 
@@ -453,14 +680,24 @@ def print_validation_report(
         print("Validation errors:")
 
         for error in result["errors"]:
-            print(f"  - {error}")
+
+            print(
+                f"  - {error}"
+            )
 
     print("=" * 60)
 
 
+# =============================================================================
+# CLI ENTRY POINT
+# =============================================================================
+
 def main():
+
     project_root = (
-        Path(__file__).resolve().parents[2]
+        Path(__file__)
+        .resolve()
+        .parents[2]
     )
 
     dataset_path = (
@@ -469,9 +706,13 @@ def main():
         / "synthetic_retail_data.csv"
     )
 
-    df = load_dataset(dataset_path)
+    df = load_dataset(
+        dataset_path
+    )
 
-    print_validation_report(df)
+    print_validation_report(
+        df
+    )
 
 
 if __name__ == "__main__":

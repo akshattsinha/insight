@@ -13,7 +13,7 @@ if str(SRC_DIR) not in sys.path:
 
 from analysis.validator import load_dataset
 from analysis.kpis import calculate_kpis
-from analysis.trends import calculate_monthly_trends
+from analysis.trends import calculate_trends
 from analysis.patterns import calculate_patterns
 from features.engineering import engineer_features
 from models.anomaly_detector import AnomalyDetector
@@ -656,40 +656,50 @@ def generate_anomaly_insights(
 
 def generate_insights(
     df: pd.DataFrame,
+    monthly_metrics: pd.DataFrame | None = None,
+    patterns: dict[str, Any] | None = None,
+    predictions: pd.DataFrame | None = None,
 ) -> list[Insight]:
     """
     Run the complete evidence-backed insight pipeline.
+
+    Precomputed analytics can be supplied by the API pipeline
+    so that trends, patterns, and anomaly detection are not
+    calculated twice.
+
+    When values are not supplied, they are calculated here as
+    a standalone fallback.
     """
 
     # ---------------------------------------------------------
     # Analytics
     # ---------------------------------------------------------
 
-    calculate_kpis(df)
+    if monthly_metrics is None:
+        monthly_metrics = calculate_trends(df)
 
-    monthly_metrics = (
-    calculate_monthly_trends(df)
-)
-
-    patterns = calculate_patterns(df)
+    if patterns is None:
+        patterns = calculate_patterns(df)
 
     # ---------------------------------------------------------
     # Feature engineering + ML
     # ---------------------------------------------------------
 
-    engineered_df = engineer_features(df)
+    if predictions is None:
 
-    detector = AnomalyDetector()
+        engineered_df = engineer_features(df)
 
-    predictions = detector.fit_predict(
-        engineered_df
-    )
+        detector = AnomalyDetector()
+
+        predictions = detector.fit_predict(
+            engineered_df
+        )
 
     # ---------------------------------------------------------
     # Insight generation
     # ---------------------------------------------------------
 
-    insights = []
+    insights: list[Insight] = []
 
     insights.extend(
         generate_trend_insights(
@@ -710,99 +720,3 @@ def generate_insights(
     )
 
     return insights
-
-
-def print_insights(
-    insights: list[Insight],
-) -> None:
-    """
-    Print structured insights in a readable format.
-    """
-
-    print()
-    print("=" * 80)
-    print("INSIGHT ENGINE")
-    print("=" * 80)
-
-    print(
-        f"Insights generated: {len(insights)}"
-    )
-
-    print()
-
-    for index, insight in enumerate(
-        insights,
-        start=1,
-    ):
-
-        print(
-            f"[{index}] {insight.title}"
-        )
-
-        print(
-            f"Severity: {insight.severity.upper()}"
-        )
-
-        print(
-            f"Finding: {insight.finding}"
-        )
-
-        print(
-            f"Impact: {insight.impact}"
-        )
-
-        print(
-            "Possible contributing factors:"
-        )
-
-        for factor in (
-            insight.possible_contributing_factors
-        ):
-            print(
-                f"  - {factor}"
-            )
-
-        print(
-            f"Recommendation: "
-            f"{insight.recommendation}"
-        )
-
-        print(
-            "Evidence:"
-        )
-
-        for evidence_item in insight.evidence:
-
-            print(
-                f"  {evidence_item}"
-            )
-
-        print("-" * 80)
-
-
-def main():
-    project_root = (
-        Path(__file__).resolve().parents[2]
-    )
-
-    dataset_path = (
-        project_root
-        / "data"
-        / "synthetic_retail_data.csv"
-    )
-
-    df = load_dataset(
-        dataset_path
-    )
-
-    insights = generate_insights(
-        df
-    )
-
-    print_insights(
-        insights
-    )
-
-
-if __name__ == "__main__":
-    main()
